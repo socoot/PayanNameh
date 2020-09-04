@@ -4,14 +4,15 @@ from __future__ import division
 import binascii
 import os
 import time
+from math import sqrt
+
+import cv2
 import tensorflow as tf
 import numpy as np
+import matplotlib.pyplot as plt
 
 from ops import *
 from utils import *
-from math import frexp, copysign
-from sys import float_info
-from models import *
 
 
 class EBGAN(object):
@@ -56,8 +57,6 @@ class EBGAN(object):
         else:
             raise NotImplementedError
 
-        self.fmax, self.max_exp, self.max_10_exp, self.fmin, self.min_exp, self.min_10_exp, self.dig, self.mant_dig, self.epsilon, self.radix, self.rounds = float_info
-
     # borrowed from https://github.com/shekkizh/EBGAN.tensorflow/blob/master/EBGAN/Faces_EBGAN.py
     def pullaway_loss(self, embeddings):
         """
@@ -75,39 +74,20 @@ class EBGAN(object):
 
     def discriminator(self, x, is_training=True, reuse=False):
         # It must be Auto-Encoder style architecture
-        # Architecture : (64)4c2s-FC32-FC64*14*14_BR-(1)4dc2s_S
         with tf.compat.v1.variable_scope("discriminator", reuse=reuse):
-            # prev autoencoder
-            '''
-            net1 = tf.nn.relu(conv2d(x, 64, 4, 4, 2, 2, name='d_conv1'))
-            net2 = tf.reshape(net1, [self.batch_size, -1])
-            code = (linear(net2, 32, scope='d_fc6'))  # bn and relu are excluded since code is used in pullaway_loss
-            net3 = tf.nn.relu(bn(linear(code, 64 * 14 * 14, scope='d_fc3'), is_training=is_training, scope='d_bn3'))
-            net4 = tf.reshape(net3, [self.batch_size, 14, 14, 64])
-            img_out = tf.nn.sigmoid(deconv2d(net4, [self.batch_size, 28, 28, 1], 4, 4, 2, 2, name='d_dc5'))
-            '''
             # encode
-            conv1 = Convolution2D([5, 5, 1, 32], activation=tf.nn.relu, scope='conv_1')(x)
-            pool1 = MaxPooling(kernel_shape=[1, 2, 2, 1], strides=[1, 2, 2, 1], padding='SAME', scope='pool_1')(conv1)
-            conv2 = Convolution2D([5, 5, 32, 32], activation=tf.nn.relu, scope='conv_2')(pool1)
-            pool2 = MaxPooling(kernel_shape=[1, 2, 2, 1], strides=[1, 2, 2, 1], padding='SAME', scope='pool_2')(conv2)
-            unfold = Unfold(scope='unfold')(pool2)
-            code = FullyConnected(20, activation=tf.nn.relu, scope='encode')(unfold)
-            # decode
-            decoded = FullyConnected(7 * 7 * 32, activation=tf.nn.relu, scope='decode')(code)
-            fold = Fold([-1, 7, 7, 32], scope='fold')(decoded)
-            unpool1 = UnPooling((2, 2), output_shape=tf.shape(conv2), scope='unpool_1')(fold)
-            deconv1 = DeConvolution2D([5, 5, 32, 32], output_shape=tf.shape(pool1), activation=tf.nn.relu,
-                                      scope='deconv_1')(unpool1)
-            unpool2 = UnPooling((2, 2), output_shape=tf.shape(conv1), scope='unpool_2')(deconv1)
-            img_out = DeConvolution2D([5, 5, 1, 32], output_shape=tf.shape(x), activation=tf.nn.sigmoid,
-                                             scope='deconv_2')(unpool2)
+            net1 = tf.nn.relu(conv2d(x, 64, 5, 5, 2, 2, name='d_conv1'))
+            net2 = tf.reshape(net1, [self.batch_size, -1])
+            code = (linear(net2, 64, scope='d_fc2'))  # bn and relu are excluded since code is used in pullaway_loss
 
-            # net = lrelu(conv2d(x, 64, 4, 4, 2, 2, name='d_conv1'))
-            # net = lrelu(bn(conv2d(net, 128, 4, 4, 2, 2, name='d_conv2'), is_training=is_training, scope='d_bn2'))
-            # net = tf.reshape(net, [self.batch_size, -1])
-            net5 = lrelu(bn(linear(unfold, 1024, scope='d_fc4'), is_training=is_training, scope='d_bn4'))
-            prob_logit = linear(net5, 1, scope='d_fc5')
+            # decode
+            net3 = tf.nn.relu(bn(linear(code, 64 * 14 * 14, scope='d_fc4'), is_training=is_training, scope='d_bn4'))
+            net4 = tf.reshape(net3, [self.batch_size, 14, 14, 64])
+            img_out = tf.nn.sigmoid(deconv2d(net4, [self.batch_size, 28, 28, 1], 5, 5, 2, 2, name='d_dc2'))
+
+            # get correctness probability
+            net03 = tf.nn.relu(bn(code, is_training=is_training, scope='d_bn3'))
+            prob_logit = linear(net03, 1, scope='d_fcp2')
             prob = tf.nn.sigmoid(prob_logit)
 
             # recon loss
@@ -117,15 +97,15 @@ class EBGAN(object):
     def generator(self, z, is_training=True, reuse=False):
         # Network Architecture is exactly same as in infoGAN (https://arxiv.org/abs/1606.03657)
         # Architecture : FC1024_BR-FC7x7x128_BR-(64)4dc2s_BR-(1)4dc2s_S
-        with tf.compat.v1.variable_scope("generator", reuse=reuse):
+        with tf.variable_scope("generator", reuse=reuse):
             net = tf.nn.relu(bn(linear(z, 1024, scope='g_fc1'), is_training=is_training, scope='g_bn1'))
             net = tf.nn.relu(bn(linear(net, 128 * 7 * 7, scope='g_fc2'), is_training=is_training, scope='g_bn2'))
             net = tf.reshape(net, [self.batch_size, 7, 7, 128])
             net = tf.nn.relu(
-                bn(deconv2d(net, [self.batch_size, 14, 14, 64], 4, 4, 2, 2, name='g_dc3'), is_training=is_training,
+                bn(deconv2d(net, [self.batch_size, 14, 14, 64], 5, 5, 2, 2, name='g_dc3'), is_training=is_training,
                    scope='g_bn3'))
 
-            out = tf.nn.sigmoid(deconv2d(net, [self.batch_size, 28, 28, 1], 4, 4, 2, 2, name='g_dc4'))
+            out = tf.nn.sigmoid(deconv2d(net, [self.batch_size, 28, 28, 1], 5, 5, 2, 2, name='g_dc4'))
 
             return out
 
@@ -151,15 +131,14 @@ class EBGAN(object):
         D_fake_img, D_fake_err, D_fake_code, D_fake_prob, D_fake_logits = self.discriminator(G, is_training=True, reuse=True)
 
         # get loss for discriminator
-        d_loss_real = tf.reduce_mean(
-            tf.nn.sigmoid_cross_entropy_with_logits(logits=D_real_logits, labels=tf.ones_like(D_real_prob)))
-        d_loss_fake = tf.reduce_mean(
-            tf.nn.sigmoid_cross_entropy_with_logits(logits=D_fake_logits, labels=tf.zeros_like(D_fake_prob)))
+        d_loss_real_prob = tf.reduce_mean(tf.nn.sigmoid_cross_entropy_with_logits(logits=D_real_logits, labels=tf.ones_like(D_real_prob)))
+        d_loss_fake_prob = tf.reduce_mean(tf.nn.sigmoid_cross_entropy_with_logits(logits=D_fake_logits, labels=tf.zeros_like(D_fake_prob)))
 
-        self.d_loss = D_real_err + tf.maximum(self.margin - D_fake_err, 0) + d_loss_real + d_loss_fake
+        self.d_loss = D_real_err + tf.maximum(self.margin - D_fake_err, 0) + d_loss_real_prob + d_loss_fake_prob
 
         # get loss for generator
-        self.g_loss = D_fake_err + self.pt_loss_weight * self.pullaway_loss(D_fake_code)
+        self.g_loss = D_fake_err + self.pt_loss_weight * self.pullaway_loss(D_fake_code) + tf.reduce_mean(
+            tf.nn.sigmoid_cross_entropy_with_logits(logits=D_fake_logits, labels=tf.ones_like(D_fake_prob)))
 
         """ Training """
         # divide trainable variables into a group for D and a group for G
@@ -171,13 +150,13 @@ class EBGAN(object):
         with tf.control_dependencies(tf.compat.v1.get_collection(tf.compat.v1.GraphKeys.UPDATE_OPS)):
             self.d_optim = tf.compat.v1.train.AdamOptimizer(self.learning_rate, beta1=self.beta1) \
                 .minimize(self.d_loss, var_list=d_vars)
-            self.g_optim = tf.compat.v1.train.AdamOptimizer(self.learning_rate * 5, beta1=self.beta1) \
+            self.g_optim = tf.compat.v1.train.AdamOptimizer(self.learning_rate*10, beta1=self.beta1) \
                 .minimize(self.g_loss, var_list=g_vars)
 
         """" Testing """
         # for test
         self.fake_images = self.generator(self.z, is_training=False, reuse=True)
-        self.real_images, _, _, _, _, = self.discriminator(self.inputs, is_training=False, reuse=True)
+        self.real_images, self.real_error, self.real_code, self.real_prob, _ = self.discriminator(self.inputs, is_training=False, reuse=True)
 
         """ Summary """
         d_loss_real_sum = tf.summary.scalar("d_error_real", D_real_err)
@@ -261,6 +240,7 @@ class EBGAN(object):
 
             # show temporal results
             self.visualize_results(epoch)
+            self.test_discriminator(epoch)
 
         # save model for final step
         self.save(self.checkpoint_dir, counter)
@@ -279,50 +259,116 @@ class EBGAN(object):
                     check_folder(
                         self.result_dir + '/' + self.model_dir) + '/' + self.model_name + '_epoch%03d' % epoch + '_test_all_classes.png')
 
-    def test_discriminator(self):
+    def get_mse_losses(self, data):
+        losses = []
+        for idx in range(0, self.num_batches):
+            print("MSE Loss Batch Number:" + str(idx))
+            batch_images = data[idx * self.batch_size:(idx + 1) * self.batch_size]
+            mse_loss = self.sess.run(self.real_error, feed_dict={self.inputs: batch_images})
+            losses.append(mse_loss)
+            # print("MSE Loss probability: " + str(mse_loss))
+        return losses
+
+    def get_corr_probs(self, data):
+        corr_nums = []
+        for idx in range(0, self.num_batches):
+            print("Correctness Batch Number:" + str(idx))
+            batch_images = data[idx * self.batch_size:(idx + 1) * self.batch_size]
+            corr = self.sess.run(self.real_prob, feed_dict={self.inputs: batch_images})
+            sum = 0
+            for idy in range(0, self.batch_size):
+                sum += corr[idy][0]
+            corr_nums.append(sum / self.batch_size)
+        return corr_nums
+
+    def plot_batches(self, my_arr, my_arr2, label, threshold=None):
+        indices = np.arange(self.num_batches)
+        if threshold is None:
+            plt.plot(indices, my_arr, 'g', my_arr2, 'r')
+        else:
+            threshold_arr = []
+            for i in range(0, self.num_batches):
+                threshold_arr.append(threshold)
+            plt.plot(indices, my_arr, 'g', my_arr2, 'r', threshold_arr, 'b')
+            plt.axis([0, 1093, 0, 1])
+        plt.xlabel('Batch Number')
+        plt.ylabel(label)
+        plt.savefig(label + '.png')
+        plt.show()
+
+    def test_mse_losses(self):
+        fake_data_x, _ = load_mnist('fashion-mnist')
+        real_losses = self.get_mse_losses(self.data_X)
+        fake_losses = self.get_mse_losses(fake_data_x)
+        self.plot_batches(real_losses, fake_losses, 'MSE Loss')
+
+    def test_corr_probs(self):
+        fake_data_x, _ = load_mnist('fashion-mnist')
+        real_probs = self.get_corr_probs(self.data_X)
+        fake_probs = self.get_corr_probs(fake_data_x)
+        threshold = 0.5
+        false_alarm = 0
+        for i in range(0, self.num_batches):
+            if fake_probs[i] > threshold:
+                false_alarm += 1
+            if real_probs[i] < threshold:
+                false_alarm += 1
+        print("False Alarm: " + str(false_alarm))
+        self.plot_batches(real_probs, fake_probs, 'Correctness', threshold)
+
+    def plot_false_alarms(self):
+        objects = ('Code Size = 16', 'Code Size = 32', 'Code Size = 64')
+        y_pos = np.arange(len(objects))
+        performance = [1106, 21, 0.0000001]
+
+        plt.bar(y_pos, performance, align='center', alpha=0.5)
+        plt.xticks(y_pos, objects)
+        plt.ylabel('False')
+        plt.title('False Alarms')
+        plt.savefig('False Alarms.png')
+        plt.show()
+
+    def test_discriminator(self, epoch):
         tot_num_samples = min(self.sample_num, self.batch_size)
         image_frame_dim = int(np.floor(np.sqrt(tot_num_samples)))
         # get batch data
         print("Number of Batches: " + str(self.num_batches))
-        for idx in range(0, self.num_batches):
-            batch_images = self.data_X[idx * self.batch_size:(idx + 1) * self.batch_size]
 
-            save_images(batch_images[:image_frame_dim * image_frame_dim, :, :, :], [image_frame_dim, image_frame_dim],
-                        check_folder(
-                            self.result_dir + '/' + self.model_dir) + '/' + self.model_name + '_input_discreminator_test_all_classes.png')
-            save_images(batch_images[:1, :, :, :], [1, 1],
-                        check_folder(
-                            self.result_dir + '/' + self.model_dir) + '/' + self.model_name + '_input_one_img_discreminator_test_all_classes.png')
+        idx = 0
+        batch_images = self.data_X[idx * self.batch_size:(idx + 1) * self.batch_size]
 
-            batch_z = np.random.uniform(-1, 1, size=(self.batch_size, self.z_dim))
-            loss_prob = self.sess.run(self.d_loss, feed_dict={self.inputs: batch_images, self.z: batch_z})
-            if loss_prob > 0.6:
-                print("Loss probability: " + str(loss_prob))
-            samples = self.sess.run(self.real_images, feed_dict={self.inputs: batch_images})
+        save_images(batch_images[:image_frame_dim * image_frame_dim, :, :, :], [image_frame_dim, image_frame_dim],
+                    check_folder(
+                        self.result_dir + '/' + self.model_dir) + '/' + self.model_name + '_input_discreminator_test_all_classes.png')
+        save_images(batch_images[:1, :, :, :], [1, 1],
+                    check_folder(
+                        self.result_dir + '/' + self.model_dir) + '/' + self.model_name + '_input_one_img_discreminator_test_all_classes.png')
 
-            # print(samples[0][0])
+        samples = self.sess.run(self.real_images, feed_dict={self.inputs: batch_images})
 
-            save_images(samples[:image_frame_dim * image_frame_dim, :, :, :], [image_frame_dim, image_frame_dim],
-                        check_folder(
-                            self.result_dir + '/' + self.model_dir) + '/' + self.model_name + '_' + str(self.epoch) + '_output_discreminator_test_all_classes.png')
-            save_images(samples[:1, :, :, :], [1, 1],
-                        check_folder(
-                            self.result_dir + '/' + self.model_dir) + '/' + self.model_name + '_' + str(self.epoch) + '_output_one_img_discreminator_test_all_classes.png')
+        save_images(samples[:image_frame_dim * image_frame_dim, :, :, :], [image_frame_dim, image_frame_dim],
+                    check_folder(
+                        self.result_dir + '/' + self.model_dir) + '/' + self.model_name + '_' + str(epoch) + '_output_discreminator_test_all_classes.png')
+        save_images(samples[:1, :, :, :], [1, 1],
+                    check_folder(
+                        self.result_dir + '/' + self.model_dir) + '/' + self.model_name + '_' + str(epoch) + '_output_one_img_discreminator_test_all_classes.png')
 
-    def normalize_images(self, batch_images):
-        normalized_images = np.array(batch_images)
-        for h in range(len(batch_images)):
-            max = 0.
-            for i in range(28):
-                for j in range(28):
-                    if batch_images[h][i][j][0] > max:
-                        max = batch_images[h][i][j][0]
-            if max > 0:
-                normalized_images[h] = batch_images[h] / max
-        return normalized_images
+        # # Load image as grayscale
+        # image = cv2.imread(check_folder(
+        #                 self.result_dir + '/' + self.model_dir) + '/' + self.model_name + '_' + str(epoch) + '_output_discreminator_test_all_classes.png', cv2.IMREAD_GRAYSCALE)
+        #
+        # # Enhance image
+        # image_enhanced = cv2.equalizeHist(image)
+        # image_enhanced = cv2.fastNlMeansDenoising(image_enhanced)
+        #
+        # kernel = np.array([[-1, -1, -1], [-1, 9, -1], [-1, -1, -1]])
+        # image_enhanced = cv2.filter2D(image_enhanced, -1, kernel)
+        #
+        # cv2.imwrite(check_folder(
+        #                 self.result_dir + '/' + self.model_dir) + '/' + self.model_name + '_' + str(epoch) + '_denoised_output_discreminator_test_all_classes.png', image_enhanced)
 
     def watermark(self, batch_images, scale_number, bit_repeat, key):
-        normalized_images = self.normalize_images(batch_images)
+        normalized_images = np.array((batch_images + 1.) / 2.)
         scaled_images = (normalized_images * scale_number).astype(int)
         binkey_length = len(key) * 8
         key_binary = format(int(binascii.hexlify(key), 16), "0" + str(binkey_length) + "b")
@@ -343,12 +389,11 @@ class EBGAN(object):
                             scaled_images[h][i][col][0] -= 1
                     kindex += 1
 
-        unscaled_images = scaled_images / scale_number
-        normalized_unscaled_images = self.normalize_images(unscaled_images)
-        return normalized_unscaled_images
+        unscaled_images = scaled_images.astype(float) / scale_number
+        return (unscaled_images * 2.) - 1.
 
     def dewatermark(self, samples, scale_number, bit_repeat, binkey_length):
-        normalized_samples = self.normalize_images(samples)
+        normalized_samples = np.array((samples + 1.) / 2.)
         scaled_samples = (normalized_samples * scale_number).astype(int)
         raw_samples_key = scaled_samples % 2
         for h in range(len(raw_samples_key)):

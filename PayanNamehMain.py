@@ -15,7 +15,7 @@ def parse_args():
 
     parser.add_argument('--dataset', type=str, default='mnist', choices=['mnist', 'fashion-mnist', 'celebA'],
                         help='The name of dataset')
-    parser.add_argument('--epoch', type=int, default=25, help='The number of epochs to run')
+    parser.add_argument('--epoch', type=int, default=28, help='The number of epochs to run')
     parser.add_argument('--batch_size', type=int, default=64, help='The size of batch')
     parser.add_argument('--z_dim', type=int, default=62, help='Dimension of noise vector')
     parser.add_argument('--checkpoint_dir', type=str, default='checkpoint',
@@ -87,9 +87,14 @@ def main():
 
         # visualize learned generator
         gan.visualize_results(args.epoch - 1)
+        gan.test_discriminator(args.epoch - 1)
         print(" [*] Testing finished!")
 
-        gan.test_discriminator()
+        # gan.test_mse_losses()
+
+        # gan.test_corr_probs()
+
+        # gan.plot_false_alarms()
 
 
 if __name__ == '__main__':
